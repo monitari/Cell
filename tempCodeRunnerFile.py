@@ -1,1 +1,2 @@
 
+                cells.remove(cell)
