@@ -9,11 +9,12 @@ import heapq
 WIDTH, HEIGHT = 1200, 800
 MAX_CELLS = 1000
 MAX_PREDATORS = 25
-SAFE_ZONE_RADIUS = 40
+SAFE_ZONE_RADIUS = 30
 SPLIT_INTERVAL = 1.0
-PREDATOR_SPAWN_DELAY = 5
+PREDATOR_SPAWN_DELAY = 6
 PREDATOR_MAX_SPEED = 200
 GRID_SIZE = 100
+EXTINCTION_THRESHOLD = 50  # 멸종 위기 임계값
 
 # Pygame 초기화
 pygame.init()
@@ -147,24 +148,42 @@ class Cell:
     def _init_genes(self):
         return {
             'size': {
-                'length': {'value': random.uniform(20, 30), 'mutation_rate': 1.5},
-                'width_ratio': {'value': random.uniform(0.2, 0.7), 'mutation_rate': 0.01}
+                'length': {
+                    'value': random.uniform(45, 65),  # 기본 길이 (45~65px)
+                    'mutation_rate': 1.8  # ±1.8% 세대당 변동
+                },
+                'width_ratio': {
+                    'value': random.uniform(0.25, 0.6),  # 길이 대비 너비 비율 
+                    'mutation_rate': 0.03  # ±0.03% 변동 (안정적 형태 유지)
+                }
             },
             'speed': {
-                'value': random.uniform(50, 150), 
-                'mutation_rate': 15.0
+                'value': random.uniform(160, 220),  # 초기 속도 (160~220px/s)
+                'mutation_rate': 6.0  # ±6.0% 변동 (적극적인 속도 진화)
             },
             'color': {
-                'hue': {'value': random.uniform(0, 360), 'mutation_rate': 4.0},
-                'saturation': {'value': 85, 'mutation_rate': 0.0},
-                'lightness': {'value': 40, 'mutation_rate': 0.0}
+                'hue': {
+                    'value': random.uniform(0, 360),  # 0~360도 색상각
+                    'mutation_rate': 3.5  # ±3.5도 변동 (시각적 다양성)
+                },
+                'saturation': {  # 채도 고정
+                    'value': 80, 
+                    'mutation_rate': 0.0
+                },
+                'lightness': {  # 명도 고정
+                    'value': 50, 
+                    'mutation_rate': 0.0
+                }
             },
             'direction_change': {
-                'interval': {'value': random.uniform(0.5, 2.0), 'mutation_rate': 0.5}
+                'interval': {
+                    'value': random.uniform(0.8, 1.5),  # 방향전환 주기 (0.8~1.5초)
+                    'mutation_rate': 0.12  # ±0.12초 변동 (적당한 행동 변화)
+                }
             },
-            'mutation_rate': {
-                'value': random.uniform(0.1, 0.3), 
-                'mutation_rate': 0.05
+            'mutation_rate': {  # 변이율 자체의 변이 설정
+                'value': random.uniform(0.15, 0.25),  # 초기 변이율 (15~25%)
+                'mutation_rate': 0.008  # ±0.008% 변동 (변이율 급변 방지)
             }
         }
 
@@ -179,9 +198,7 @@ class Cell:
         self.color = hsl_to_rgb(h, s, l)
         self.collision_radius = self.length * 0.6
         self.angle = math.degrees(math.atan2(-self.direction.y, self.direction.x)) - 90
-        genes['direction_change']['interval']['value'] = max(
-            0.01, genes['direction_change']['interval']['value']
-        )
+        genes['direction_change']['interval']['value'] = max(0.01, genes['direction_change']['interval']['value'])
 
     def mutate_gene(self, gene):
         if isinstance(gene, dict):
@@ -218,16 +235,20 @@ class Cell:
         if next_pos.x - self.collision_radius < 0:
             next_pos.x = self.collision_radius
             self.direction.x *= -1
+            self.angle = math.degrees(math.atan2(-self.direction.y, self.direction.x)) - 90
         elif next_pos.x + self.collision_radius > WIDTH:
             next_pos.x = WIDTH - self.collision_radius
             self.direction.x *= -1
+            self.angle = math.degrees(math.atan2(-self.direction.y, self.direction.x)) - 90
 
         if next_pos.y - self.collision_radius < 0:
             next_pos.y = self.collision_radius
             self.direction.y *= -1
+            self.angle = math.degrees(math.atan2(-self.direction.y, self.direction.x)) - 90
         elif next_pos.y + self.collision_radius > HEIGHT:
             next_pos.y = HEIGHT - self.collision_radius
             self.direction.y *= -1
+            self.angle = math.degrees(math.atan2(-self.direction.y, self.direction.x)) - 90
 
         self.pos = Vector2(
             max(self.collision_radius, min(WIDTH - self.collision_radius, next_pos.x)),
@@ -251,7 +272,7 @@ class Cell:
     def split(self, mode="self"):
         children = []
         count = 2 if mode == "death" else 1
-        offset_range = 20  # 분열 시 위치 오프셋 범위
+        offset_range = 5  # 분열 시 위치 오프셋 범위
 
         for _ in range(count):
             child = Cell(
@@ -283,11 +304,13 @@ class Cell:
 
 class Predator:
     __slots__ = ['pos', 'vel', 'size', 'color', 'collision_radius', 
-                'safe_zone_pos', 'safe_zone_radius', 'angle', 'rotated_image_cache']
-    
+                'safe_zone_pos', 'safe_zone_radius', 'angle', 'rotated_image_cache',
+                'direction', 'dir_timer', 'direction_change_interval']
+
     def __init__(self, pos):
         self.pos = Vector2(pos)
-        self.vel = Vector2(0, -1).rotate(random.uniform(0, 360)).normalize() * PREDATOR_MAX_SPEED
+        self.direction = Vector2(0, -1).rotate(random.uniform(0, 360)).normalize()
+        self.vel = self.direction * PREDATOR_MAX_SPEED
         self.size = 35
         self.color = COLORS["predator"]
         self.collision_radius = self.size * 0.6
@@ -295,29 +318,49 @@ class Predator:
         self.safe_zone_radius = SAFE_ZONE_RADIUS
         self.rotated_image_cache = {}
         self.angle = 0.0
+        self.dir_timer = 0.0
+        self.direction_change_interval = random.uniform(1.0, 3.0)  # 1~3초 간격으로 방향 변경
 
     def update(self, dt):
+        # 주기적 방향 변경
+        self.dir_timer += dt
+        if self.dir_timer >= self.direction_change_interval:
+            self.direction = self.direction.rotate(random.uniform(-30, 30))  # -30~30도 회전
+            self.vel = self.direction * PREDATOR_MAX_SPEED
+            self.dir_timer = 0
+            self.direction_change_interval = random.uniform(0.0, 3.0)  # 0~3초 간격으로 방향 변경
+
+        # 안전 구역 반발
         safe_dist = self.pos.distance_to(self.safe_zone_pos)
-        repel_dir = None
-        
-        if safe_dist < self.safe_zone_radius + self.collision_radius:
+        min_allowed_dist = self.safe_zone_radius + self.collision_radius
+
+        if safe_dist < min_allowed_dist:
+            # 반발 방향 계산 및 위치 보정
             repel_dir = (self.pos - self.safe_zone_pos).normalize()
-            self.vel = self.vel.reflect(repel_dir) * 1.2
+            self.direction = self.direction.reflect(repel_dir)
+            self.vel = self.direction * PREDATOR_MAX_SPEED * 1.2
+            
+            # 위치 강제 조정 (중첩 방지)
+            overlap = min_allowed_dist - safe_dist
+            self.pos += repel_dir * (overlap + 5)  # 5px 추가 여유
 
-        self.vel.scale_to_length(min(self.vel.length(), PREDATOR_MAX_SPEED))
-
-        next_pos = self.pos + self.vel * dt
-        if next_pos.x - self.collision_radius < 0 or next_pos.x + self.collision_radius > WIDTH:
-            self.vel.x *= -1
-        if next_pos.y - self.collision_radius < 0 or next_pos.y + self.collision_radius > HEIGHT:
-            self.vel.y *= -1
-
+        # 화면 순환 이동 (벽 통과 구현)
         self.pos += self.vel * dt
-        self.pos.x = max(self.collision_radius, min(WIDTH - self.collision_radius, self.pos.x))
-        self.pos.y = max(self.collision_radius, min(HEIGHT - self.collision_radius, self.pos.y))
+        
+        # X축 순환
+        if self.pos.x < -self.collision_radius: self.pos.x = WIDTH + self.collision_radius
+        elif self.pos.x > WIDTH + self.collision_radius: self.pos.x = -self.collision_radius
+
+        # Y축 순환
+        if self.pos.y < -self.collision_radius: self.pos.y = HEIGHT + self.collision_radius
+        elif self.pos.y > HEIGHT + self.collision_radius: self.pos.y = -self.collision_radius
+
+        # 화면 경계 내 위치 보정 (선택적)
+        self.pos.x = max(-self.collision_radius, min(WIDTH + self.collision_radius, self.pos.x))
+        self.pos.y = max(-self.collision_radius, min(HEIGHT + self.collision_radius, self.pos.y))
 
     def draw(self, surface):
-        self.angle = math.degrees(math.atan2(-self.vel.y, self.vel.x)) - 90
+        self.angle = math.degrees(math.atan2(-self.direction.y, self.direction.x)) - 90
         angle = round(self.angle * 2) / 2
         
         if angle not in self.rotated_image_cache:
@@ -337,15 +380,17 @@ def main():
     game_start_time = pygame.time.get_ticks() / 1000
     split_timer = 0.0
     graph_data = []
-    graph_rect = pygame.Rect(WIDTH-320, 10, 300, 150)
-    
+    graph_timer = 0.0
+    graph_delay = 0.5  # 그래프 업데이트 주기 (0.5초)
+    max_graph_points = 100  # 최대 표시 데이터 포인트 수
+    graph_rect = pygame.Rect(WIDTH-320, 10, 300, 150)  # 그래프 위치 및 크기    
     grid = SpatialGrid(GRID_SIZE)
-    predator_grid = SpatialGrid(GRID_SIZE)
 
     running = True
     while running:
         dt = clock.tick() / 1000
         current_time = pygame.time.get_ticks() / 1000
+        graph_timer += dt
 
         # 이벤트 처리
         for event in pygame.event.get():
@@ -372,7 +417,7 @@ def main():
         # 세대 기반 분열 (death 모드)
         if cells:
             max_gen = max(c.generation for c in cells)
-            split_cells = [c for c in cells if c.generation + 50 <= max_gen]
+            split_cells = [c for c in cells if c.generation + 10 < max_gen] # 10세대 초과 세포 추출
             available = MAX_CELLS - len(cells)
             max_splits = min(len(split_cells), available)
             
@@ -380,8 +425,7 @@ def main():
                 new_children = cell.split(mode="death")
                 cells.extend(new_children)
                 cells.remove(cell)
-                if len(cells) >= MAX_CELLS:
-                    break
+                if len(cells) >= MAX_CELLS: break
 
         # 포식자 생성
         if current_time - game_start_time >= PREDATOR_SPAWN_DELAY:
@@ -431,13 +475,62 @@ def main():
                 break
         
         # 렌더링
-        screen.fill(COLORS["background"])
+        screen.fill(COLORS["background"]) # 배경 초기화
         pygame.draw.circle(screen, COLORS["safe_zone"], (WIDTH//2, HEIGHT//2), SAFE_ZONE_RADIUS, 3)
 
+        # 세포 & 포식자 렌더링
         for cell in cells: cell.draw(screen)
         for predator in predators: predator.draw(screen)
         particle_pool.update(dt)
         particle_pool.draw(screen)
+
+        # 멸종 위기 경고 메시지
+        if len(cells) < EXTINCTION_THRESHOLD:
+            warning_text = font.render("WARNING: EXTINCTION RISK!", True, (255, 50, 50))
+            if len(cells) == 0:
+                warning_text = font.render("EXTINCTION! GAME OVER!", True, (255, 50, 50))
+            warning_rect = warning_text.get_rect(center=(WIDTH // 2, 30))
+            screen.blit(warning_text, warning_rect)
+
+        # 그래프 데이터 업데이트
+        if graph_timer >= graph_delay:
+            graph_timer = 0
+            graph_data.append(len(cells))
+            if len(graph_data) > max_graph_points: graph_data = graph_data[-max_graph_points:]
+        
+        # === 그래프 렌더링 ===
+        graph_surface = pygame.Surface((graph_rect.width, graph_rect.height), pygame.SRCALPHA)
+        graph_surface.fill(COLORS["graph_bg"])
+        
+        # 그리드 라인
+        max_y = MAX_CELLS * 1.2
+        grid_steps = list(range(0, int(max_y), 200))
+        for y in grid_steps:
+            y_pos = graph_rect.height - (y/max_y * graph_rect.height)
+            pygame.draw.line(graph_surface, COLORS["graph_line"], (0, y_pos), (graph_rect.width, y_pos), 1)
+
+        # 데이터 라인
+        if len(graph_data) >= 2:
+            x_step = graph_rect.width / (len(graph_data)-1)
+            points = []
+            for i, v in enumerate(graph_data):
+                x = i * x_step
+                y = graph_rect.height - (v/max_y * graph_rect.height)
+                points.append((x, y))
+
+            for i in range(1, len(points)):
+                prev = points[i-1]
+                curr = points[i]
+                color = COLORS["graph_increase"] if graph_data[i] > graph_data[i-1] else COLORS["graph_decrease"]
+                pygame.draw.line(graph_surface, color, prev, curr, 2)
+
+        # 현재 값 텍스트
+        value_text = font_small.render(f"Cells: {len(cells)}/{MAX_CELLS}", True, COLORS["hud"])
+        graph_surface.blit(value_text, (10, 5))
+        
+        # 메인 화면에 그래프 적용
+        screen.blit(graph_surface, graph_rect.topleft)
+        pygame.draw.rect(screen, COLORS["hud"], graph_rect, 1, border_radius=3)
 
         # 툴팁 렌더링
         if hovered_cell:
@@ -463,19 +556,29 @@ def main():
 
         # HUD 표시
         elapsed = datetime.now() - start_time
+        total_seconds = int(elapsed.total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        gen_range = (
+            f"{min(c.generation for c in cells)}~{max(c.generation for c in cells)}"
+            if cells else "0~0"
+        )
         hud_text = [
-            f"Time: {elapsed.seconds//60:02}:{elapsed.seconds%60:02}",
+            f"Time: {hours:02}:{minutes:02}:{seconds:02}",
             f'FPS: {int(clock.get_fps())}',
             f"Cells: {len(cells)}/{MAX_CELLS}",
             f"Predators: {len(predators)}/{MAX_PREDATORS}",
-            f"Generation: {min(c.generation for c in cells)}~{max(c.generation for c in cells) if cells else 0}"
+            f"Generation: {gen_range}"
         ]
         
         hud_bg = pygame.Surface((300, 160), pygame.SRCALPHA)
         hud_bg.fill((0, 0, 0, 150))
         screen.blit(hud_bg, (10, 0))
         
-        for i, text in enumerate(hud_text): screen.blit(font.render(text, True, COLORS["hud"]), (20, 10 + i*30))
+        for i, text in enumerate(hud_text):
+            color = COLORS["graph_increase"] if "Cells" in text and len(cells) <= EXTINCTION_THRESHOLD else COLORS["hud"]
+            screen.blit(font.render(text, True, color), (20, 10 + i*30))
 
         pygame.display.flip()
 
